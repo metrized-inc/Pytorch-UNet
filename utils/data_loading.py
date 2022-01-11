@@ -38,7 +38,8 @@ class BasicDataset(Dataset):
         elif not is_mask:
             img_ndarray = img_ndarray.transpose((2, 0, 1))
 
-        if not is_mask:
+        # if not is_mask:
+        if is_mask:
             img_ndarray = img_ndarray / 255
 
         return img_ndarray
@@ -55,7 +56,8 @@ class BasicDataset(Dataset):
 
     def __getitem__(self, idx):
         name = self.ids[idx]
-        mask_file = list(self.masks_dir.glob(name + self.mask_suffix + '.*'))
+        # mask_file = list(self.masks_dir.glob(name + self.mask_suffix + '.*'))
+        mask_file = list(self.masks_dir.glob(name + '.*'))
         img_file = list(self.images_dir.glob(name + '.*'))
 
         assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
