@@ -16,28 +16,18 @@ from tqdm import tqdm
 
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
+from utils.output_file_path import increment_path
+from utils.weighted_cross_entropy import weighted_cross_entropy_loss
 from evaluate import evaluate
 from unet import UNet
 
-dir_img = Path('./data/imgs/')
-dir_mask = Path('./data/masks/')
-dir_checkpoint = Path('./checkpoints/')
+# dir_img = Path('./data/imgs/')
+# dir_mask = Path('./data/masks/')
+# dir_checkpoint = Path('./checkpoints/')
 
-def increment_path(path, exist_ok=False, sep='', mkdir=False):
-    # Increment file or directory path, i.e. runs/exp --> runs/exp{sep}2, runs/exp{sep}3, ... etc.
-    path = Path(path)  # os-agnostic
-    if path.exists() and not exist_ok:
-        path, suffix = (path.with_suffix(''), path.suffix) if path.is_file() else (path, '')
-        dirs = glob.glob(f"{path}{sep}*")  # similar paths
-        matches = [re.search(rf"%s{sep}(\d+)" % path.stem, d) for d in dirs]
-        i = [int(m.groups()[0]) for m in matches if m]  # indices
-        n = max(i) + 1 if i else 2  # increment number
-        path = Path(f"{path}{sep}{n}{suffix}")  # increment path
-    if mkdir:
-        path.mkdir(parents=True, exist_ok=True)  # make directory
-    return path
 
-def train_net(net,
+def train_net(args,
+              net,
               device,
               epochs: int = 5,
               batch_size: int = 1,
@@ -45,12 +35,18 @@ def train_net(net,
               val_percent: float = 0.1,
               save_checkpoint: bool = True,
               img_scale: float = 0.5,
+              img_size: int = 480,
               amp: bool = False):
     # 1. Create dataset
+    # try:
+    #     dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
+    # except (AssertionError, RuntimeError):
+    #     dataset = BasicDataset(dir_img, dir_mask, img_scale)
+
     try:
-        dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
+        dataset = CarvanaDataset(dir_img, dir_mask, img_size)
     except (AssertionError, RuntimeError):
-        dataset = BasicDataset(dir_img, dir_mask, img_scale)
+        dataset = BasicDataset(dir_img, dir_mask, img_size)
 
     # 2. Split into train / validation partitions
     n_val = int(len(dataset) * val_percent)
@@ -82,7 +78,14 @@ def train_net(net,
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(net.parameters(), lr=learning_rate, weight_decay=1e-8, momentum=0.9)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)  # goal: maximize Dice score
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)  # goal: maximize Dice score
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=args.lr,
+        epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        verbose=False,
+    )
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss()
     global_step = 0
@@ -108,10 +111,12 @@ def train_net(net,
 
                 with torch.cuda.amp.autocast(enabled=amp):
                     masks_pred = net(images)
-                    loss = criterion(masks_pred, true_masks) \
-                           + dice_loss(F.softmax(masks_pred, dim=1).float(),
-                                       F.one_hot(true_masks, net.n_classes).permute(0, 3, 1, 2).float(),
-                                       multiclass=True)
+
+                    # loss = weighted_cross_entropy_loss(masks_pred, true_masks) + dice_loss(F.softmax(masks_pred, dim=1).float(),
+                    #                                                                 F.one_hot(true_masks, net.n_classes).permute(0, 3, 1, 2).float(),
+                    #                                                                 multiclass=True)
+
+                    loss = weighted_cross_entropy_loss(masks_pred, true_masks)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -160,12 +165,17 @@ def train_net(net,
             torch.save(net.state_dict(), str(os.path.join(save_dir, 'checkpoint_epoch{}.pth'.format(epoch + 1))))
             logging.info(f'Checkpoint {epoch + 1} saved!')
 
+    logging.info('Checkpoints saved to {}'.format(save_dir))
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
+    parser.add_argument('--img_path', type=str, default=None, help='Path to images')
+    parser.add_argument('--mask_path', type=str, default=None, help='Path to segmentation masks')
+    parser.add_argument('--img_size', type=int, default=480, help='Train/val image size')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=0.00001,
+    parser.add_argument('--lr', '-l', metavar='LR', type=float, default=0.00001,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
@@ -178,6 +188,11 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
+
+    global dir_img, dir_mask, dir_checkpoint
+    dir_img = Path(args.img_path)
+    dir_mask = Path(args.mask_path)
+    dir_checkpoint = Path('./checkpoints/')
 
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -199,12 +214,14 @@ if __name__ == '__main__':
 
     net.to(device=device)
     try:
-        train_net(net=net,
+        train_net(args=args,
+                  net=net,
                   epochs=args.epochs,
                   batch_size=args.batch_size,
                   learning_rate=args.lr,
                   device=device,
                   img_scale=args.scale,
+                  img_size=args.img_size,
                   val_percent=args.val / 100,
                   amp=args.amp)
     except KeyboardInterrupt:
