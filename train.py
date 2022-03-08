@@ -21,28 +21,20 @@ from utils.weighted_cross_entropy import weighted_cross_entropy_loss
 from evaluate import evaluate
 from unet import UNet
 
-# dir_img = Path('./data/imgs/')
-# dir_mask = Path('./data/masks/')
-# dir_checkpoint = Path('./checkpoints/')
-
 
 def train_net(args,
               net,
               device,
+              save_dir,
               epochs: int = 5,
               batch_size: int = 1,
               learning_rate: float = 0.001,
               val_percent: float = 0.1,
               save_checkpoint: bool = True,
-              img_scale: float = 0.5,
               img_size: int = 480,
               amp: bool = False):
-    # 1. Create dataset
-    # try:
-    #     dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
-    # except (AssertionError, RuntimeError):
-    #     dataset = BasicDataset(dir_img, dir_mask, img_scale)
 
+    # 1. Create dataset
     try:
         dataset = CarvanaDataset(dir_img, dir_mask, img_size)
     except (AssertionError, RuntimeError):
@@ -60,19 +52,18 @@ def train_net(args,
 
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
-    experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-                                  val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale,
-                                  amp=amp))
+    experiment.config.update(dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate, img_size=img_size,
+                                  val_percent=val_percent, save_checkpoint=save_checkpoint, amp=amp))
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
         Batch size:      {batch_size}
         Learning rate:   {learning_rate}
+        Images size:  {img_size}
         Training size:   {n_train}
         Validation size: {n_val}
         Checkpoints:     {save_checkpoint}
         Device:          {device.type}
-        Images scaling:  {img_scale}
         Mixed Precision: {amp}
     ''')
 
@@ -87,7 +78,6 @@ def train_net(args,
         verbose=False,
     )
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.CrossEntropyLoss()
     global_step = 0
 
     save_dir = str(increment_path(Path(dir_checkpoint) / 'exp'))
@@ -169,30 +159,29 @@ def train_net(args,
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
+    parser = argparse.ArgumentParser()
     parser.add_argument('--img_path', type=str, default=None, help='Path to images')
     parser.add_argument('--mask_path', type=str, default=None, help='Path to segmentation masks')
     parser.add_argument('--img_size', type=int, default=480, help='Train/val image size')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--lr', '-l', metavar='LR', type=float, default=0.00001,
-                        help='Learning rate', dest='lr')
+    parser.add_argument('--n_classes', type=int, default=2, help='Number of classes (n_classes = 2 means 1 background and 1 object')
+    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
+    parser.add_argument('--batch-size', type=int, default=4, help='Batch size')
+    parser.add_argument('--lr', type=float, default=0.00001, help='Learning rate')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
-    parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
-    parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
-                        help='Percent of the data that is used as validation (0-100)')
+    parser.add_argument('--validation', type=float, default=0.1, help='Percent of the data that is used as validation (0-1)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
 
     return parser.parse_args()
 
 
-if __name__ == '__main__':
+def main():
     args = get_args()
 
     global dir_img, dir_mask, dir_checkpoint
     dir_img = Path(args.img_path)
     dir_mask = Path(args.mask_path)
     dir_checkpoint = Path('./checkpoints/')
+    save_dir = str(increment_path(Path(dir_checkpoint) / 'exp'))
 
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -201,7 +190,7 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    net = UNet(n_channels=3, n_classes=2, bilinear=True)
+    net = UNet(n_channels=3, n_classes=args.n_classes, bilinear=True)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
@@ -220,11 +209,16 @@ if __name__ == '__main__':
                   batch_size=args.batch_size,
                   learning_rate=args.lr,
                   device=device,
-                  img_scale=args.scale,
                   img_size=args.img_size,
-                  val_percent=args.val / 100,
-                  amp=args.amp)
+                  val_percent=args.val,
+                  amp=args.amp,
+                  save_dir=save_dir)
+
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), 'INTERRUPTED.pth')
+        torch.save(net.state_dict(), os.path.join(save_dir,'INTERRUPTED.pth'))
         logging.info('Saved interrupt')
         sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()
